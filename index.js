@@ -1,19 +1,33 @@
+'use strict';
+
+require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api')
 const mysql = require('mysql2/promise')
 const moment = require('moment')
+const cron = require('node-cron');
 
-const token = '6890333729:AAEd2_s2HfhCY-MbOaJvcODJ-sqp9KBzFUg' // Replace with your own bot token
+const token = process.env.BOT_TOKEN // Replace with your own bot token
 const bot = new TelegramBot(token, { polling: true })
-const CHATID = '-4175886129'
+const CHATID = process.env.CHAT_ID
 
 // MySQL database configuration
 const dbConfig = {
-  host: '127.0.0.1',
-  user: 'sts',
-  password: 'StsMySQL1!',
-  database: 'db_billing',
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_DATABASE,
 }
 const connMysql = mysql.createPool(dbConfig)
+
+connMysql.getConnection((err, connection) => {
+  if (err) {
+    console.error('Error connecting to MySQL:', err.message);
+  } else {
+    console.log('Connected to MySQL!');
+    // Release the connection back to the pool
+    connection.release();
+  }
+});
 
 // ===== SETUP BOT =====
 async function runBot() {
@@ -40,6 +54,15 @@ async function runBot() {
   }
 }
 
+async function cron_job() {
+  cron.schedule('0 6 * * *', async () => { // Cron expression for every second
+    try {
+      await sendReport(CHATID);
+    } catch (err) {
+      console.error('Error nih : ', err);
+    }
+  });
+}
 // ===== SEND REPORT =====
 async function sendReport() {
   const conn = await connMysql.getConnection()
@@ -124,6 +147,7 @@ async function sendReport() {
 }
 
 runBot()
+cron_job()
 
 process.once('SIGINT', () => {
   bot.stopPolling()
