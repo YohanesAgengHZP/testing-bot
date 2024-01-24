@@ -1,107 +1,128 @@
-const TelegramBot = require('node-telegram-bot-api');
-const mysql = require('mysql2/promise');
+const TelegramBot = require('node-telegram-bot-api')
+const mysql = require('mysql2/promise')
+const moment = require('moment')
 
-const token = '6890333729:AAEd2_s2HfhCY-MbOaJvcODJ-sqp9KBzFUg'; // Replace with your own bot token
-const bot = new TelegramBot(token, { polling: true });
+const token = '6890333729:AAEd2_s2HfhCY-MbOaJvcODJ-sqp9KBzFUg' // Replace with your own bot token
+const bot = new TelegramBot(token, { polling: true })
 
 // MySQL database configuration
 const dbConfig = {
-    host: '127.0.0.1',
-    user: 'sts',
-    password: 'StsMySQL1!',
-    database: 'db_billing'
-  };
+  host: '127.0.0.1',
+  user: 'sts',
+  password: 'StsMySQL1!',
+  database: 'db_billing',
+}
+const connMysql = mysql.createPool(dbConfig)
 
-  // Create a connection to the database
-const connection = mysql.createConnection(dbConfig);
+// ===== SETUP BOT =====
+async function runBot() {
+  try {
+    // Get message from input bot
+    bot.on('message', async (msg) => {
+      const chatId = msg.chat.id
+      const messageText = msg.text
 
-connection.connect((err) => {
-    if (err) {
-      console.error('Error connecting to MySQL:', err);
-    } else {
-      console.log('Connected to MySQL database');
-    }
-  });
+      if (messageText === '/start') {
+        bot.sendMessage(chatId, 'Hello TCEL!')
+        return
+      } else if (messageText === '/report') {
+        await sendReport(chatId)
+        return
+      }
+    })
+    return
+  } catch (err) {
+    console.error('Error nih : ', err)
+  } finally {
+  }
+}
 
-  bot.on('message', (msg) => {
-    const chatId = msg.chat.id;
-    const messageText = msg.text;
-  
-    if (messageText === '/start') {
-      bot.sendMessage(chatId, 'Hello TCEL!');
-    } else if (messageText === '/report') {
-      // Get the dates for h-2 and h-1
-      const today = new Date();
-      const h1Date = new Date(today);
-      const h2Date = new Date(today);
-      
-      h1Date.setDate(today.getDate() - 1); // h-1
-      h2Date.setDate(today.getDate() - 2); // h-2
-  
-      const formatDate = (date) => date.toISOString().split('T')[0];
-  
-      const h1DateString = formatDate(h1Date);
-      const h2DateString = formatDate(h2Date);
-  
-      // Fetch data from MySQL for h-2 and h-1
-      const queryH2 = `
-        SELECT value
+// ===== SEND REPORT =====
+async function sendReport(chatId) {
+  const conn = await connMysql.getConnection()
+
+  await conn.beginTransaction()
+  try {
+    let mess = ``
+
+    // Get the dates for h-2 and h-1
+    const h1Day = moment().clone().subtract(1, 'days').format('YYYY-MM-DD')
+    const h2Day = moment().clone().subtract(2, 'days').format('YYYY-MM-DD')
+
+    // Get Total Delivered
+    const qSql = await conn.execute(
+      `SELECT SUM(value) AS total
         FROM sms_transaction_summarize_dates
-        WHERE summarize_code = 'TOTAL_SMS_P2P'
-          AND date = '${h2DateString}'
-      `;
-  
-      const queryH1 = `
-        SELECT value
-        From sms_transaction_summarize_dates
-        GROUP BY summarize_code
-          AND date = '${h1DateString}'
-      `;
+        WHERE summarize_code LIKE 'TRAFFIC_A2P%'
+          AND JSON_UNQUOTE(RESULT->'$.status') = 'DELIVERED'
+          AND lower(JSON_UNQUOTE(RESULT->'$.aggr_name')) NOT IN ('telin')
+          AND date BETWEEN ? AND ?`,
+      [h2Day, h1Day]
+    )
 
-      connection.query(queryH2, (errorH2, resultsH2, fieldsH2) => {
-        if (errorH2) {
-          console.error('Error fetching h-2 data from MySQL:', errorH2);
-          bot.sendMessage(chatId, 'Error fetching h-2 data from MySQL');
-          return;
-        }
-  
-        connection.query(queryH1, (errorH1, resultsH1, fieldsH1) => {
-          if (errorH1) {
-            console.error('Error fetching h-1 data from MySQL:', errorH1);
-            bot.sendMessage(chatId, 'Error fetching h-1 data from MySQL');
-            return;
-          }
+    // Get Top 5 Client
+    const qSql2 = await conn.execute(
+      `SELECT JSON_UNQUOTE(RESULT->'$.partner_name') AS partner_name,
+              sum(value) AS total
+        FROM sms_transaction_summarize_dates stsd
+        WHERE summarize_code LIKE 'TRAFFIC_A2P%'
+            AND lower(JSON_UNQUOTE(RESULT->'$.aggr_name')) NOT IN ('telin')
+            AND JSON_UNQUOTE(RESULT->'$.partner_name') IS NOT NULL
+            AND JSON_UNQUOTE(RESULT->'$.status') = 'DELIVERED'
+            AND date BETWEEN ? AND ?
+        GROUP BY JSON_UNQUOTE(RESULT->'$.partner_name')
+        ORDER BY total DESC
+        LIMIT 5`,
+      [h2Day, h1Day]
+    )
 
-                      
-  
-          // Compare values and generate the report
-          const h2Value = resultsH2.length > 0 ? resultsH2[0].value : 'N/A';
-          const h1Value = resultsH1.length > 0 ? resultsH1[0].value : 'N/A';
-  
-          const reportData = `
-            Comparison Report:
-            h-2 (${h2DateString}): ${h2Value}
-            h-1 (${h1DateString}): ${h1Value}
-          `;
-  
-          bot.sendMessage(chatId, reportData);
-        });
-      });
+    // Get Top 5 SenderID
+    const qSql3 = await conn.execute(
+      `SELECT JSON_UNQUOTE(RESULT->'$.addr_src_digit') AS addr_src_digit,
+              sum(value) AS total
+        FROM sms_transaction_summarize_dates stsd
+        WHERE JSON_UNQUOTE(RESULT->'$.aggr_name') IS NOT NULL
+            AND lower(JSON_UNQUOTE(RESULT->'$.aggr_name')) NOT IN ('telin')
+            AND JSON_UNQUOTE(RESULT->'$.addr_src_digit') IS NOT NULL
+            AND JSON_UNQUOTE(RESULT->'$.status') = 'DELIVERED'
+            AND date BETWEEN ? AND ?
+        GROUP BY JSON_UNQUOTE(RESULT->'$.addr_src_digit')
+        ORDER BY total DESC
+        LIMIT 5`,
+      [h2Day, h1Day]
+    )
+
+    mess += `Report (${h2Day} - ${h1Day}) \n`
+    mess += `-----------\n`
+    mess += `Total Delivered : ${qSql[0][0].total} \n`
+    mess += `-----------\n`
+
+    // Set Message Top 5 Client
+    mess += `Top 5 Client\n`
+    for await (const { partner_name, total } of qSql2[0]) {
+      mess += ` • ${partner_name} : ${total}\n`
     }
-  });
-  
-  // Handle errors
-  connection.on('error', (err) => {
-    console.error('MySQL connection error:', err);
-  });
-  
-  // Close the MySQL connection when the bot is stopped
-  process.once('SIGINT', () => {
-    connection.end();
-    bot.stopPolling();
-  });
-  
-  // Handle unhandled promise rejections
-  process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  });
+
+    // Set Message Top 5 SenderId
+    mess += `-----------\n`
+    mess += `Top 5 SENDERID\n`
+
+    for await (const { addr_src_digit, total } of qSql3[0]) {
+      mess += ` • ${addr_src_digit} : ${total}\n`
+    }
+
+    bot.sendMessage(chatId, mess)
+    return
+  } catch (error) {
+    console.log('Error nih : ', error)
+    conn.rollback()
+  } finally {
+    conn.release()
+  }
+}
+
+runBot()
+
+process.once('SIGINT', () => {
+  bot.stopPolling()
+})
